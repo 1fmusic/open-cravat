@@ -9,6 +9,13 @@ import json
 import re
 import time
 
+def get_keycol (level):
+    if level == 'variant':
+        keycol = 'base__uid'
+    elif level == 'gene':
+        keycol = 'base__hugo'
+    return keycol
+
 class FilterColumn(object):
 
     test2sql = {
@@ -27,11 +34,12 @@ class FilterColumn(object):
         'select': 'in',
     }
 
-    def __init__(self, d):
+    def __init__(self, d, parent_operator):
         self.column = d['column']
         self.test = d['test']
         self.value = d.get('value')
         self.negate = d.get('negate', False)
+        self.parent_operator = parent_operator
 
     def get_sql(self):
         incexc = 'include'
@@ -42,7 +50,7 @@ class FilterColumn(object):
                     s += ' or s.base__sample_id="' + v + '"'
             elif type(self.value) == str:
                 s = 's.base__sample_id="' + self.value + '"'
-            if self.negate:
+            if self.negate and self.parent_operator == 'AND':
                 incexc = 'exclude'
         elif self.column == 'tagsampler__tags':
             s = 'm.base__tags="' + self.value[0] + '"'
@@ -98,50 +106,90 @@ class FilterColumn(object):
         return s, incexc
 
 class FilterGroup(object):
-    def __init__(self, d):
+    def __init__(self, d, level):
+        self.level = level
         self.operator = d.get('operator', 'and')
         self.negate = d.get('negate',False)
-        self.groups = [FilterGroup(x) for x in d.get('groups',[])]
-        self.columns = [FilterColumn(x) for x in d.get('columns', [])]
+        self.groups = [FilterGroup(x, self.level) for x in d.get('groups',[])]
+        self.columns = [FilterColumn(x, self.operator) for x in d.get('columns', [])]
+
+    def determine_sample_or_tag_needed (self, sqls):
+        sample_needed = False
+        for sql in sqls:
+            if 's.base__sample_id' in sql:
+                sample_needed = True
+                break
+        tag_needed = False
+        for sql in sqls:
+            if 'm.base__tags' in sql:
+                tag_needed = True
+                break
+        from_add = ''
+        if sample_needed:
+            from_add += ', sample as s'
+        if tag_needed:
+            from_add += ', mapping as m'
+        where_add = ''
+        if sample_needed:
+            where_add += ' and s.base__uid=t.base__uid'
+        if tag_needed:
+            where_add += ' and m.base__uid=t.base__uid'
+        return from_add, where_add
 
     def get_sql(self):
-        all_operands = self.groups + self.columns
-        if len(all_operands) == 0:
-            return '', ''
-        include_sqls = []
-        exclude_sqls = []
-        for operand in all_operands:
-            if type(operand) == FilterColumn:
-                sql, incexc = operand.get_sql()
-                if sql == '':
-                    continue
-                if incexc == 'include':
-                    include_sqls.append(sql)
-                elif incexc == 'exclude':
-                    exclude_sqls.append(sql)
-            elif type(operand) == FilterGroup:
-                g_inc_sqls, g_exc_sqls = operand.get_sql()
-                include_sqls.append(g_inc_sqls)
-                exclude_sqls.append(g_exc_sqls)
-        s = '('
-        sql_operator = ' ' + self.operator + ' '
-        s += sql_operator.join([sql for sql in include_sqls])
-        s += ')'
+        column_include_sqls = []
+        column_exclude_sqls = []
+        for operand in self.columns:
+            sql, incexc = operand.get_sql()
+            if sql == '':
+                continue
+            if incexc == 'include':
+                column_include_sqls.append(sql)
+            elif incexc == 'exclude':
+                column_exclude_sqls.append(sql)
+        print(column_include_sqls)
+        print(column_exclude_sqls)
+        q = ''
+        keycol = get_keycol(self.level)
+        if len(column_include_sqls) > 0 or len(column_exclude_sqls) > 0:
+            q = 'select distinct(t.{}) from {} as t'.format(keycol, self.level)
+            if len(column_include_sqls) > 0:
+                from_add, where_add = self.determine_sample_or_tag_needed(column_include_sqls)
+                q += from_add
+                s = ''
+                sql_operator = ' ' + self.operator + ' '
+                s += sql_operator.join([sql for sql in column_include_sqls])
+                q += ' where ({})'.format(s)
+                q += where_add
+            if len(column_exclude_sqls) > 0:
+                from_add, where_add = self.determine_sample_or_tag_needed(column_exclude_sqls)
+                q += ' except select distinct(t.{}) from {} as t'.format(keycol, self.level)
+                q += from_add
+                s = ''
+                sql_operator = ' ' + self.operator + ' '
+                s += sql_operator.join([sql for sql in column_exclude_sqls])
+                q += ' where ({})'.format(s)
+                q += where_add
+        print('after columns q=', q)
+        group_qs = []
+        for operand in self.groups:
+            group_q = operand.get_sql()
+            group_qs.append(group_q)
+        if len(group_qs) > 0:
+            for group_q in group_qs:
+                if q != '':
+                    if self.operator == 'AND':
+                        q += ' INTERSECT'
+                    elif self.operator == 'OR':
+                        q += ' UNION'
+                q += ' select * from ({})'.format(group_q)
+        print('negate=', self.negate)
         if self.negate:
-            s = 'not'+s
-        if s == '()' or s == 'not()':
-            s = ''
-        include_sql = s
-        s = '('
-        sql_operator = ' ' + self.operator + ' '
-        s += sql_operator.join([sql for sql in exclude_sqls])
-        s += ')'
-        if self.negate:
-            s = 'not'+s
-        if s == '()' or s == 'not()':
-            s = ''
-        exclude_sql = s
-        return include_sql, exclude_sql
+            print('negating. q=', q)
+            q = 'select t.{} from {} as t except {}'.format(keycol, self.level, q)
+            print('after negating q=', q)
+        print('final q=', q)
+        return q
 
 class CravatFilter ():
     def __init__ (self, dbpath=None, filterpath=None, filtername=None, 
@@ -335,39 +383,24 @@ class CravatFilter ():
         self.cursor.execute('pragma synchronous=2')
 
     def getwhere (self, level):
+        keycol = get_keycol(level)
         if self.filter == None:
-            sample_needed = False
-            tag_needed = False
-            include_where = ''
-            exclude_where = ''
+            q = 'select {} from {}'.format(keycol, level)
         else:
             if level not in self.filter:
-                sample_needed = False
-                tag_needed = False
-                include_where = ''
-                exclude_where = ''
+                q = 'select {} from {}'.format(keycol, level)
             else:
                 criteria = self.filter[level]
-                main_group = FilterGroup(criteria)
-                include_sql, exclude_sql = main_group.get_sql()
-                if include_sql == '':
-                    include_where = ''
-                else:
-                    include_where = ' where ' + include_sql
-                if exclude_sql == '':
-                    exclude_where = ''
-                else:
-                    exclude_where = ' where ' + exclude_sql
-                sample_needed = 's.base__sample_id' in include_where or 's.base__sample_id' in exclude_where
-                tag_needed = 'm.base__tags' in include_where or 'm.base__tags' in exclude_where
-        return (sample_needed, tag_needed, include_where, exclude_where)
+                main_group = FilterGroup(criteria, level)
+                q = main_group.get_sql()
+        return q
 
     def getvariantcount (self):
         return self.getcount('variant')
-    
+
     def getgenecount (self):
         return self.getcount('gene')
-    
+
     def getcount (self, level='variant'):
         level = 'variant'
         self.make_filtered_uid_table()
@@ -379,27 +412,25 @@ class CravatFilter ():
             print('#' + level)
             print(str(n))
         return n
-    
+
     def getvariantrows (self):
         return self.getrows('variant')
-    
+
     def getgenerows (self):
         return self.getrows('gene')
-    
+
     def getrows (self, level='variant'):
         (sample_needed, tag_needed, include_where, exclude_where) = self.getwhere(level)
         q = 'select *  from ' + level + include_where + ' except select * from ' + level + exclude_where
         self.cursor.execute(q)
-        
         ret = [list(v) for v in self.cursor.fetchall()]
-        
         if self.stdout == True:
             print('#' + level)
             for row in ret:
                 print('\t'.join([str(v) for v in row]))
         
         return ret
-    
+
     def get_gene_row (self, hugo):
         q = 'select * from gene where base__hugo=?'
         self.cursor.execute(q, [hugo])
@@ -420,17 +451,14 @@ class CravatFilter ():
         return it
 
     def get_filtered_iterator (self, level='variant'):
+        kcol = get_keycol(level)
         if level == 'variant':
-            kcol = 'base__uid'
             ftable = 'variant_filtered'
         elif level == 'gene':
-            kcol = 'base__hugo'
             ftable = 'gene_filtered'
         elif level == 'sample':
-            kcol = 'base__uid'
             ftable = 'variant_filtered'
         elif level == 'mapping':
-            kcol = 'base__uid'
             ftable = 'variant_filtered'
         table = level
         if level in ['variant', 'gene', 'sample', 'mapping']:
@@ -447,28 +475,10 @@ class CravatFilter ():
         vftable = level + '_filtered'
         q = 'drop table if exists ' + vftable
         self.cursor.execute(q)
-        (sample_needed, tag_needed, include_where, exclude_where) = self.getwhere(level)
-        q = 'create table {} as select t.base__uid from {} as t'.format(vftable, level) 
-        if sample_needed:
-            q += ', sample as s '
-        if tag_needed:
-            q += ', mapping as m '
-        q += include_where
-        if sample_needed:
-            q += ' and s.base__uid=t.base__uid'
-        if tag_needed:
-            q += ' and m.base__uid=t.base__uid'
-        if exclude_where != '':
-            q += ' except select t.base__uid from {} as t'.format(level)
-            if sample_needed:
-                q += ', sample as s '
-            if tag_needed:
-                q += ', mapping as m '
-            q += exclude_where
-            if sample_needed:
-                q += ' and s.base__uid=t.base__uid'
-            if tag_needed:
-                q += ' and m.base__uid=t.base__uid'
+        q = 'create table {} as select * from '.format(vftable) 
+        subq = self.getwhere(level)
+        q = q + '(' + subq + ')'
+        print(q)
         self.cursor.execute(q)
         self.cursor.execute('pragma synchronous=2')
 
@@ -476,14 +486,12 @@ class CravatFilter ():
         self.cursor.execute('pragma synchronous=0')
         level = 'gene'
         vtable = 'variant'
+        keycol = get_keycol(level)
         vftable = vtable + '_filtered'
         gftable = level + '_filtered'
         q = 'drop table if exists ' + gftable
         self.cursor.execute(q)
-        q = 'create table ' + gftable +\
-            ' as select distinct v.base__hugo from ' + vtable + ' as v'\
-            ' inner join ' + vftable + ' as vf on vf.base__uid=v.base__uid'\
-            ' where v.base__hugo is not null'
+        q = 'create table gene_filtered as select distinct v.base__hugo from variant as v inner join variant_filtered as vf on vf.base__uid=v.base__uid where v.base__hugo is not null'
         self.cursor.execute(q)
         self.cursor.execute('pragma synchronous=2')
         
