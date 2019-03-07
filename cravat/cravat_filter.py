@@ -14,6 +14,10 @@ def get_keycol (level):
         keycol = 'base__uid'
     elif level == 'gene':
         keycol = 'base__hugo'
+    elif level == 'sample':
+        keycol = 'base__uid'
+    elif level == 'mapping':
+        keycol = 'base__uid'
     return keycol
 
 class FilterColumn(object):
@@ -147,12 +151,10 @@ class FilterGroup(object):
                 column_include_sqls.append(sql)
             elif incexc == 'exclude':
                 column_exclude_sqls.append(sql)
-        print(column_include_sqls)
-        print(column_exclude_sqls)
         q = ''
         keycol = get_keycol(self.level)
+        q = 'select distinct(t.{}) from {} as t'.format(keycol, self.level)
         if len(column_include_sqls) > 0 or len(column_exclude_sqls) > 0:
-            q = 'select distinct(t.{}) from {} as t'.format(keycol, self.level)
             if len(column_include_sqls) > 0:
                 from_add, where_add = self.determine_sample_or_tag_needed(column_include_sqls)
                 q += from_add
@@ -170,7 +172,6 @@ class FilterGroup(object):
                 s += sql_operator.join([sql for sql in column_exclude_sqls])
                 q += ' where ({})'.format(s)
                 q += where_add
-        print('after columns q=', q)
         group_qs = []
         for operand in self.groups:
             group_q = operand.get_sql()
@@ -183,12 +184,8 @@ class FilterGroup(object):
                     elif self.operator == 'OR':
                         q += ' UNION'
                 q += ' select * from ({})'.format(group_q)
-        print('negate=', self.negate)
         if self.negate:
-            print('negating. q=', q)
             q = 'select t.{} from {} as t except {}'.format(keycol, self.level, q)
-            print('after negating q=', q)
-        print('final q=', q)
         return q
 
 class CravatFilter ():
