@@ -57,9 +57,14 @@ class FilterColumn(object):
             if self.negate and self.parent_operator == 'AND':
                 incexc = 'exclude'
         elif self.column == 'tagsampler__tags':
-            s = 'm.base__tags="' + self.value[0] + '"'
-            for v in self.value[1:]:
-                s += ' or m.base__tags="' + v + '"'
+            if type(self.value) == list:
+                s = 'm.base__tags="' + self.value[0] + '"'
+                for v in self.value[1:]:
+                    s += ' or m.base__tags="' + v + '"'
+            elif type(self.value) == str:
+                s = 'm.base__tags="' + self.value + '"'
+            if self.negate and self.parent_operator == 'AND':
+                incexc = 'exclude'
         elif self.test == 'multicategory':
             s = 't.{} like "%{}%"'.format(self.column, self.value[0])
             for v in self.value[1:]:
