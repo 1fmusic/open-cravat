@@ -4,6 +4,7 @@ import traceback
 import os
 import logging
 from logging.handlers import QueueHandler
+import asyncio
 
 def run_annotator_mp(module, cmd, d):
     completion_status = 'incomplete'

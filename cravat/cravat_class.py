@@ -5,7 +5,7 @@ import sys
 from . import admin_util as au
 from . import util
 from .config_loader import ConfigLoader
-import sqlite3
+import aiosqlite3
 import datetime
 from types import SimpleNamespace
 from .constants import liftover_chain_paths
@@ -21,6 +21,9 @@ from .exceptions import *
 import yaml
 import cravat.cravat_util as cu
 import collections
+import aioprocessing as ap
+import aioprocessing.managers
+import asyncio
 
 cravat_cmd_parser = argparse.ArgumentParser(
     prog='cravat input_file_path',
@@ -187,7 +190,7 @@ cravat_cmd_parser.add_argument('--forcedinputformat',
                     default=None,
                     help='Force input format')
 
-class MyManager (multiprocessing.managers.SyncManager):
+class MyManager (aioprocessing.managers.AioSyncManager):
     pass
 
 class Cravat (object):
@@ -314,7 +317,7 @@ class Cravat (object):
                 ):
                 print('Running annotators...')
                 stime = time.time()
-                self.run_annotators_mp()
+                await self.run_annotators_mp()
                 rtime = time.time() - stime
                 print('\tannotator(s) finished in {0:.3f}s'.format(rtime))
             if self.args.ea:
@@ -325,8 +328,8 @@ class Cravat (object):
                     self.args.rg
                 ):
                 print('Running aggregator...')
-                self.result_path = self.run_aggregator()
-                self.write_job_info()
+                self.result_path = await self.run_aggregator()
+                await self.write_job_info()
             if self.args.sp == False and \
                 (
                     self.runlevel <= self.runlevels['postaggregator'] or
@@ -552,7 +555,7 @@ class Cravat (object):
         genemapper = genemapper_class(cmd, self.status_writer)
         genemapper.run()
 
-    def run_aggregator (self):
+    async def run_aggregator (self):
         # Variant level
         print('\t{0:30s}\t'.format('Variants'), end='', flush=True)
         stime = time.time()
@@ -566,7 +569,7 @@ class Cravat (object):
         if self.verbose:
             print(' '.join(cmd))
         v_aggregator = Aggregator(cmd)
-        v_aggregator.run()
+        await v_aggregator.run()
         rtime = time.time() - stime
         print('finished in {0:.3f}s'.format(rtime)) 
 
@@ -581,7 +584,7 @@ class Cravat (object):
         if self.verbose:
             print(' '.join(cmd))
         g_aggregator = Aggregator(cmd)
-        g_aggregator.run()
+        await g_aggregator.run()
         rtime = time.time() - stime
         print('finished in {0:.3f}s'.format(rtime))
 
@@ -596,7 +599,7 @@ class Cravat (object):
         if self.verbose:
             print(' '.join(cmd))
         s_aggregator = Aggregator(cmd)
-        s_aggregator.run()
+        await s_aggregator.run()
         rtime = time.time() - stime
         print('finished in {0:.3f}s'.format(rtime))
 
@@ -610,7 +613,7 @@ class Cravat (object):
         if self.verbose:
             print(' '.join(cmd))
         m_aggregator = Aggregator(cmd)
-        m_aggregator.run()
+        await m_aggregator.run()
         rtime = time.time() - stime
         print('finished in {0:.3f}s'.format(rtime))
 
@@ -663,7 +666,7 @@ class Cravat (object):
                 all_reporters_ran_well = False
         return all_reporters_ran_well
 
-    def run_annotators_mp (self):
+    async def run_annotators_mp (self):
         default_workers = mp.cpu_count() - 1
         if default_workers < 1: 
             default_workers = 1
@@ -725,7 +728,7 @@ class Cravat (object):
             pool.join()
         try:
             for result in results.get():
-                pass
+                 pass
         except Exception as e:
             self.handle_exception(e)
         self.log_path = os.path.join(self.output_dir, self.run_name + '.log')
@@ -743,40 +746,41 @@ class Cravat (object):
         else:
             return True
 
-    def write_job_info (self):
+    async def write_job_info (self):
         dbpath = os.path.join(self.output_dir, self.run_name + '.sqlite')
-        conn = sqlite3.connect(dbpath)
-        cursor = conn.cursor()
+        conn = await aiosqlite3.connect(dbpath)
+        cursor = await conn.cursor()
         q = 'drop table if exists info'
-        cursor.execute(q)
+        await cursor.execute(q)
         q = 'create table info (colkey text, colval text)'
-        cursor.execute(q)
+        await cursor.execute(q)
         created = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         q = 'insert into info values ("Result created at", "' + created + '")'
-        cursor.execute(q)
+        await cursor.execute(q)
         q = 'insert into info values ("Input file name", "' + self.input + '")'
-        cursor.execute(q)
+        await cursor.execute(q)
         q = 'insert into info values ("Input genome", "' + self.input_assembly + '")'
-        cursor.execute(q)
+        await cursor.execute(q)
         q = 'select count(*) from variant'
-        cursor.execute(q)
-        no_input = str(cursor.fetchone()[0])
+        await cursor.execute(q)
+        row = await cursor.fetchone()
+        no_input = str(row[0])
         q = 'insert into info values ("Number of unique input variants", "' + no_input + '")'
-        cursor.execute(q)
+        await cursor.execute(q)
         q = 'insert into info values ("open-cravat", "{}")'.format(self.pkg_ver)
-        cursor.execute(q)
+        await cursor.execute(q)
         if hasattr(self, 'genemapper'):
             version = self.genemapper.conf['version']
             title = self.genemapper.conf['title']
             modulename = self.genemapper.name
             genemapper_str = '{} ({})'.format(title, version)
             q = 'insert into info values ("Gene mapper", "{}")'.format(genemapper_str)
-            cursor.execute(q)
+            await cursor.execute(q)
         '''
         q = 'update variant_annotator set version="{}" where name="{}"'.format(version, modulename)
-        cursor.execute(q)
+        await cursor.execute(q)
         q = 'update gene_annotator set version="{}" where name="{}"'.format(version, modulename)
-        cursor.execute(q)
+        await cursor.execute(q)
         '''
         annotators_str = ''
         for modulename in self.annotators.keys():
@@ -785,14 +789,14 @@ class Cravat (object):
             title = annot.conf['title']
             level = annot.conf['level']
             q = 'update {}_annotator set version="{}" where name="{}"'.format(level, version, modulename)
-            cursor.execute(q)
+            await cursor.execute(q)
             annotators_str += '{} ({}), '.format(title, version)
         annotators = annotators_str.rstrip(', ')
         q = 'insert into info values ("Annotators", "' + annotators_str + '")'
-        cursor.execute(q)
+        await cursor.execute(q)
         conn.commit()
-        cursor.close()
-        conn.close()
+        await cursor.close()
+        await conn.close()
 
     def run_summarizers (self):
         for module in self.ordered_summarizers:

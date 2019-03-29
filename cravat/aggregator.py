@@ -1,7 +1,7 @@
 import os
 import argparse
 import sys
-import sqlite3
+import aiosqlite3
 import re
 import time
 import logging
@@ -84,16 +84,16 @@ class Aggregator (object):
         self.error_logger = logging.getLogger('error.aggregator')
         self.unique_excs = []
 
-    def run(self):
-        self._setup()
+    async def run(self):
+        await self._setup()
         if self.input_base_fname == None:
             return
         start_time = time.time()
         self.logger.info('started: %s' %\
                          time.asctime(time.localtime(start_time)))
-        self.dbconn.commit()
-        self.cursor.execute('pragma synchronous=0;')
-        self.cursor.execute('pragma journal_mode=WAL;')
+        await self.dbconn.commit()
+        await self.cursor.execute('pragma synchronous=0;')
+        await self.cursor.execute('pragma journal_mode=WAL;')
         n = 0
         # Prepare insert statement
         col_names = self.base_reader.get_column_names()
@@ -107,12 +107,12 @@ class Aggregator (object):
             try:
                 n += 1
                 vals = [rd.get(c) for c in col_names]
-                self.cursor.execute(q, vals)
+                await self.cursor.execute(q, vals)
                 if n%self.commit_threshold == 0:
-                    self.dbconn.commit()
+                    await self.dbconn.commit()
             except Exception as e:
                 self._log_runtime_error(lnum, line, e)
-        self.dbconn.commit()
+        await self.dbconn.commit()
         for annot_name in self.annotators:
             reader = self.readers[annot_name]
             n = 0
@@ -137,27 +137,27 @@ class Aggregator (object):
                         ', '.join(update_toks),
                         self.base_prefix + '__' + self.key_name,
                         key_val)
-                    self.cursor.execute(q)
+                    await self.cursor.execute(q)
                     if n%self.commit_threshold == 0:
-                        self.dbconn.commit()
+                        await self.dbconn.commit()
                 except Exception as e:
                     self._log_runtime_error(lnum, line, e)
-            self.dbconn.commit()
-        self.fill_categories()
-        self.cursor.execute('pragma synchronous=2;')
-        self.cursor.execute('pragma journal_mode=delete;')
+            await self.dbconn.commit()
+        await self.fill_categories()
+        await self.cursor.execute('pragma synchronous=2;')
+        await self.cursor.execute('pragma journal_mode=delete;')
         end_time = time.time()
         self.logger.info('finished: %s' %time.asctime(time.localtime(end_time)))
         runtime = end_time - start_time
         self.logger.info('runtime: %s' %round(runtime, 3))
-        self._cleanup()
+        await self._cleanup()
 
-    def make_reportsub (self):
+    async def make_reportsub (self):
         if self.level in ['variant', 'gene']:
             q = 'select * from {}_reportsub'.format(self.level)
-            self.cursor.execute(q)
+            await self.cursor.execute(q)
             self.reportsub = {}
-            for r in self.cursor.fetchall():
+            for r in await self.cursor.fetchall():
                 (col_name, sub) = r
                 self.reportsub[col_name] = json.loads(sub)
         else:
@@ -171,10 +171,10 @@ class Aggregator (object):
                 col_cats = col_cats.replace(k, sub[k])
         return col_cats
 
-    def fill_categories (self):
+    async def fill_categories (self):
         q = 'select * from {}_header'.format(self.level)
-        self.cursor.execute(q)
-        rs = self.cursor.fetchall()
+        await self.cursor.execute(q)
+        rs = await self.cursor.fetchall()
         cols_to_fill = []
         for r in rs:
             col_name = r[0]
@@ -189,11 +189,11 @@ class Aggregator (object):
                     cols_to_fill.append(col_name)
                 else:
                     col_cats_str = self.do_reportsub_col_cats_str(col_name, col_cats_str)
-                    self.write_col_cats_str(col_name, col_cats_str)
+                    await self.write_col_cats_str(col_name, col_cats_str)
         for col_name in cols_to_fill:
             q = 'select distinct {} from {}'.format(col_name, self.level)
-            self.cursor.execute(q)
-            rs = self.cursor.fetchall()
+            await self.cursor.execute(q)
+            rs = await self.cursor.fetchall()
             col_cats = []
             for r in rs:
                 if r[0] == None:
@@ -205,19 +205,19 @@ class Aggregator (object):
             col_cats.sort()
             col_cats_str = '[' + ','.join(['"' + v + '"' for v in col_cats]) + ']'
             col_cats_str = self.do_reportsub_col_cats_str(col_name, col_cats_str)
-            self.write_col_cats_str(col_name, col_cats_str)
-        self.dbconn.commit()
+            await self.write_col_cats_str(col_name, col_cats_str)
+        await self.dbconn.commit()
 
-    def write_col_cats_str (self, col_name, col_cats_str):
+    async def write_col_cats_str (self, col_name, col_cats_str):
         q = 'update {}_header set col_cats=\'{}\' where col_name=\'{}\''.format(
             self.level,
             col_cats_str,
             col_name)
-        self.cursor.execute(q)
+        await self.cursor.execute(q)
 
-    def _cleanup(self):
-        self.cursor.close()
-        self.dbconn.close()
+    async def _cleanup(self):
+        await self.cursor.close()
+        await self.dbconn.close()
 
     def set_input_base_fname (self):
         crv_fname = self.name + '.crv'
@@ -241,7 +241,7 @@ class Aggregator (object):
     def set_output_base_fname (self):
         self.output_base_fname = self.name
 
-    def _setup(self):
+    async def _setup(self):
         if self.level == 'variant':
             self.key_name = 'uid'
         elif self.level == 'gene':
@@ -270,22 +270,22 @@ class Aggregator (object):
                         os.path.join(self.input_dir, fname)
         self.annotators.sort()
         self.base_fpath = os.path.join(self.input_dir, self.input_base_fname)
-        self._setup_io()
-        self._setup_table()
+        await self._setup_io()
+        await self._setup_table()
 
-    def _setup_table(self):
+    async def _setup_table(self):
         columns = []
         unique_names = set([])
         # annotator table
         annotator_table = self.level + '_annotator'
         q = 'drop table if exists {:}'.format(annotator_table)
-        self.cursor.execute(q)
+        await self.cursor.execute(q)
         q = 'create table {:} (name text, displayname text, version text)'.format(
             annotator_table)
-        self.cursor.execute(q)
+        await self.cursor.execute(q)
         q = 'insert into {:} values ("{:}", "{:}", "{:}")'.format(
             annotator_table, 'base', 'Base Information', "")
-        self.cursor.execute(q)
+        await self.cursor.execute(q)
         for _, col_def in self.base_reader.get_all_col_defs().items():
             col_name = self.base_prefix + '__' + col_def['name']
             columns.append([col_name, col_def['title'], col_def['type'], col_def['categories'], col_def['width'], col_def['desc'], col_def['hidden'], col_def['category'], col_def['filterable'], col_def['link_format']])
@@ -300,7 +300,7 @@ class Aggregator (object):
                 annotator_displayname = annotator_name.upper()
             q = 'insert into {:} values ("{:}", "{:}", "{:}")'.format(
                 annotator_table, annotator_name, annotator_displayname, "")
-            self.cursor.execute(q)
+            await self.cursor.execute(q)
             orded_col_index = sorted(list(reader.get_all_col_defs().keys()))
             for col_index in orded_col_index:
                 col_def = reader.get_col_def(col_index)
@@ -325,10 +325,10 @@ class Aggregator (object):
             col_def_strings.append(s)
         # data table
         q = 'drop table if exists %s' %self.table_name
-        self.cursor.execute(q)
+        await self.cursor.execute(q)
         q = 'create table %s (%s);' \
             %(self.table_name, ', '.join(col_def_strings))
-        self.cursor.execute(q)
+        await self.cursor.execute(q)
         # index tables
         index_n = 0
         # index_columns is a list of columns to include in this index
@@ -339,26 +339,26 @@ class Aggregator (object):
                         idx_num = str(index_n),
                         columns = ', '.join(cols)
                         )
-            self.cursor.execute(q)
+            await self.cursor.execute(q)
             index_n += 1
         # header table
         q = 'drop table if exists %s' %self.header_table_name
-        self.cursor.execute(q)
+        await self.cursor.execute(q)
         q = 'create table %s (col_name text, col_title text, col_type text, col_cats text, col_width int, col_desc text, col_hidden boolean, col_ctg text, col_filterable boolean, col_link_format text);' \
             %(self.header_table_name)
-        self.cursor.execute(q)
+        await self.cursor.execute(q)
         for col_row in columns:
             if col_row[3]:
                 col_row[3] = json.dumps(col_row[3])
             # use prepared statement to allow " characters in categories and desc
             insert_template = 'insert into {} values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'.format(self.header_table_name)
-            self.cursor.execute(insert_template, col_row)
+            await self.cursor.execute(insert_template, col_row)
         # report substitution table
         if self.level in ['variant', 'gene']:
             q = 'drop table if exists {}'.format(self.reportsub_table_name)
-            self.cursor.execute(q)
+            await self.cursor.execute(q)
             q = 'create table {} (module text, subdict text)'.format(self.reportsub_table_name)
-            self.cursor.execute(q)
+            await self.cursor.execute(q)
             if hasattr(self.base_reader, 'report_substitution'):
                 sub = self.base_reader.report_substitution
                 if sub:
@@ -368,7 +368,7 @@ class Aggregator (object):
                         'base',
                         json.dumps(sub)
                     )
-                    self.cursor.execute(q)
+                    await self.cursor.execute(q)
             for module in self.readers:
                 if hasattr(self.base_reader, 'report_substitution'):
                     sub = self.readers[module].report_substitution
@@ -378,11 +378,11 @@ class Aggregator (object):
                             module,
                             json.dumps(sub)
                         )
-                        self.cursor.execute(q)
-        self.make_reportsub()
-        self.dbconn.commit()
+                        await self.cursor.execute(q)
+        await self.make_reportsub()
+        await self.dbconn.commit()
 
-    def _setup_io(self):
+    async def _setup_io(self):
         self.base_reader = CravatReader(self.base_fpath)
         for annot_name in self.annotators:
             self.readers[annot_name] = CravatReader(self.ipaths[annot_name])
@@ -390,8 +390,8 @@ class Aggregator (object):
         self.db_path = os.path.join(self.output_dir, self.db_fname)
         if self.delete and os.path.exists(self.db_path):
             os.remove(self.db_path)
-        self.dbconn = sqlite3.connect(self.db_path)
-        self.cursor = self.dbconn.cursor()
+        self.dbconn = await aiosqlite3.connect(self.db_path)
+        self.cursor = await self.dbconn.cursor()
 
     def _log_runtime_error(self, ln, line, e):
         err_str = traceback.format_exc().rstrip()
