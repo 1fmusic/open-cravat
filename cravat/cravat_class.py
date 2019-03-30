@@ -336,7 +336,7 @@ class Cravat (object):
                     self.args.rp
                 ):
                 print('Running post-aggregators...')
-                self.run_postaggregators()
+                await self.run_postaggregators()
             if self.args.sr == False and \
                 (
                     self.runlevel <= self.runlevels['reporter'] or
@@ -619,7 +619,7 @@ class Cravat (object):
 
         return v_aggregator.db_path
 
-    def run_postaggregators (self):
+    async def run_postaggregators (self):
         modules = au.get_local_module_infos_of_type('postaggregator')
         for module_name in modules:
             module = modules[module_name]
@@ -631,8 +631,9 @@ class Cravat (object):
                 print(' '.join(cmd))
             post_agg_cls = util.load_class('CravatPostAggregator', module.script_path)
             post_agg = post_agg_cls(cmd)
+            await post_agg.prep()
             stime = time.time()
-            post_agg.run()
+            await post_agg.run()
             rtime = time.time() - stime
             print('finished in {0:.3f}s'.format(rtime))
 

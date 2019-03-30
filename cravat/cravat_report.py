@@ -1,6 +1,5 @@
 import argparse
 import sys
-import sqlite3
 import os
 import json
 from cravat.cravat_filter import CravatFilter

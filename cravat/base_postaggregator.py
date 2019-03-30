@@ -1,4 +1,4 @@
-import sqlite3
+import aiosqlite3
 import sys
 import traceback
 import logging
@@ -27,7 +27,9 @@ class BasePostAggregator (object):
         self.dbconn = None
         self.cursor = None
         self.cursor_w = None
-        self._open_db_connection()
+
+    async def prep (self):
+        await self._open_db_connection()
         self.should_run_annotate = self.check()
 
     def check(self):
@@ -76,13 +78,13 @@ class BasePostAggregator (object):
         self.levelno = LEVELS[self.level]
         self.dbpath = os.path.join(self.output_dir, self.run_name + '.sqlite')
 
-    def run(self):
+    async def run(self):
         if not self.should_run_annotate:
             return
         start_time = time.time()
         self.logger.info('started: {0}'.format(time.asctime(time.localtime(start_time))))
-        self.base_setup()
-        for input_data in self._get_input():
+        await self.base_setup()
+        async for input_data in self._get_input():
             try:
                 output_dict = self.annotate(input_data)
                 fixed_output = {}
@@ -91,22 +93,22 @@ class BasePostAggregator (object):
                 self.write_output(input_data, fixed_output)
             except Exception as e:
                 self._log_runtime_exception(input_data, e)
-        self.fill_categories()
-        self.dbconn.commit()
-        self.base_cleanup()
+        await self.fill_categories()
+        await self.dbconn.commit()
+        await self.base_cleanup()
         end_time = time.time()
         run_time = end_time - start_time
         self.logger.info('finished: {0}'.format(time.asctime(time.localtime(end_time))))
         self.logger.info('runtime: {0:0.3f}'.format(run_time))
 
-    def fill_categories (self):
+    async def fill_categories (self):
         for col_def in self.conf['output_columns']:
             if 'category' not in col_def or col_def['category'] not in ['single', 'multi']:
                 continue
             col_name = col_def['name']
             q = 'select distinct {} from {}'.format(col_name, self.level)
-            self.cursor.execute(q)
-            rs = self.cursor.fetchall()
+            await self.cursor.execute(q)
+            rs = await self.cursor.fetchall()
             col_cats = []
             for r in rs:
                 col_cat_str = r[0] if r[0] is not None else ''
@@ -118,10 +120,10 @@ class BasePostAggregator (object):
                 self.level,
                 '[' + ','.join(['"' + v + '"' for v in col_cats]) + ']',
                 col_name)
-            self.cursor.execute(q)
-        self.dbconn.commit()
+            await self.cursor.execute(q)
+        await self.dbconn.commit()
 
-    def write_output (self, input_data, output_dict):
+    async def write_output (self, input_data, output_dict):
         q = ''
         for col_def in self.conf['output_columns']:
             col_name = col_def['name']
@@ -144,7 +146,7 @@ class BasePostAggregator (object):
             q += 'base__uid=' + str(input_data['base__uid'])
         elif self.levelno == GENE:
             q += 'base__hugo="' + input_data['base__hugo'] + '"'
-        self.cursor_w.execute(q)
+        await self.cursor_w.execute(q)
 
     def _log_runtime_exception(self, input_data, e):
         try:
@@ -158,32 +160,32 @@ class BasePostAggregator (object):
 
     # Setup function for the base_annotator, different from self.setup() 
     # which is intended to be for the derived annotator.
-    def base_setup(self):
-        self._alter_tables()
+    async def base_setup(self):
+        await self._alter_tables()
         self.setup()
 
-    def _open_db_connection (self):
+    async def _open_db_connection (self):
         self.db_path = os.path.join(self.output_dir, self.run_name + '.sqlite')
         if os.path.exists(self.db_path):
-            self.dbconn = sqlite3.connect(self.db_path)
-            self.cursor = self.dbconn.cursor()
-            self.cursor_w = self.dbconn.cursor()
+            self.dbconn = await aiosqlite3.connect(self.db_path)
+            self.cursor = await self.dbconn.cursor()
+            self.cursor_w = await self.dbconn.cursor()
         else:
             msg = self.db_path + ' not found'
             if self.logger:
                 self.logger.error(msg)
             sys.exit(msg)
 
-    def _close_db_connection (self):
-        self.cursor.close()
-        self.cursor_w.close()
-        self.dbconn.close()
+    async def _close_db_connection (self):
+        await self.cursor.close()
+        await self.cursor_w.close()
+        await self.dbconn.close()
 
-    def _alter_tables (self):
+    async def _alter_tables (self):
         # annotator table
         q = 'insert into {:} values ("{:}", "{:}", "{}")'.format(
             self.level + '_annotator', self.module_name, self.conf['title'], self.conf['version'])
-        self.cursor_w.execute(q)
+        await self.cursor_w.execute(q)
         # data table and header table
         header_table_name = self.level + '_header'
         for col_def in self.conf['output_columns']:
@@ -200,21 +202,21 @@ class BasePostAggregator (object):
             # data table
             q = 'alter table ' + self.level + ' add column ' +\
                 colname + ' ' + self.cr_type_to_sql[coltype]
-            self.cursor_w.execute(q)
+            await self.cursor_w.execute(q)
             # header table
             # use prepared statement to allow " characters in colcats and coldesc
             q = 'insert into {} values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'.format(header_table_name)
-            self.cursor_w.execute(q,[colname, coltitle, coltype, colcats, colwidth, coldesc, colhidden, col_ctg, col_filterable, col_link_format])
-        self.dbconn.commit()
+            await self.cursor_w.execute(q,[colname, coltitle, coltype, colcats, colwidth, coldesc, colhidden, col_ctg, col_filterable, col_link_format])
+        await self.dbconn.commit()
 
     # Placeholder, intended to be overridded in derived class
     def setup(self):
         pass
 
-    def base_cleanup(self):
+    async def base_cleanup(self):
         self.cleanup()
         if self.dbconn != None:
-            self._close_db_connection()
+            await self._close_db_connection()
 
     def cleanup(self):
         pass
@@ -227,12 +229,12 @@ class BasePostAggregator (object):
         self.error_logger = logging.getLogger('error.' + self.module_name)
         self.unique_excs = []
 
-    def _get_input(self):
-        dbconnloop = sqlite3.connect(self.db_path)
-        cursorloop = dbconnloop.cursor()
+    async def _get_input(self):
+        dbconnloop = await aiosqlite3.connect(self.db_path)
+        cursorloop = await dbconnloop.cursor()
         q = 'select * from ' + self.level
-        cursorloop.execute(q)
-        for row in cursorloop.fetchall():
+        await cursorloop.execute(q)
+        for row in await cursorloop.fetchall():
             try:
                 input_data = {}
                 for i in range(len(row)):
